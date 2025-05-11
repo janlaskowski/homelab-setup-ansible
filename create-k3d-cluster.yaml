@@ -60,9 +60,9 @@
     - name: Install k3d via Homebrew
       community.general.homebrew:
         name: k3d
-        state: present
         state: latest
         update_homebrew: yes # Ensure Homebrew is updated before installing
+      when: ansible_facts['os_family'] == "Darwin"
 
     - name: Check if k3d cluster already exists
       command: k3d cluster list -o json
@@ -106,5 +106,29 @@
           You should now see the 'k3d-{{ k3d_cluster_name }}' context when you run 'kubectl config get-contexts'.
       when: create_cluster_result is defined or (k3d_list is success and k3d_cluster_name in k3d_list.stdout) # Show message if cluster was created or already existed
 
+    - name: Install Flux CLI via Homebrew
+      register: flux_cli_install_brew
+      community.general.homebrew:
+        name: fluxcd/tap/flux
+        state: latest
+      when: ansible_facts['os_family'] == "Darwin"
 
+    - name: Ensure Flux CD prerequisites are met
+      ansible.builtin.command: flux check --pre
+      # Only run this check if Flux CLI was installed by either of the previous tasks
+      when: flux_cli_install_brew.changed | default(true) # Adjusted condition
 
+    - name: Bootstrap Flux CD onto the cluster
+      # The $GITHUB_USER and $GITHUB_GITOPS_REPO variables are defined as ENV Vars
+      ansible.builtin.command: >
+        flux bootstrap github \
+            --owner=$GITHUB_USER \
+            --repository=$GITHUB_GITOPS_REPO \
+            --branch=main \
+            --personal
+      # The creates argument here is a simple way to prevent re-bootstrapping
+      # In a more advanced scenario, you might check for the existence of
+      # Flux resources in the cluster.
+      args:
+        creates: ~/.config/flux/$GITHUB_USER/$GITHUB_GITOPS_REPO/gotk-components.yaml
+      # Ensure this task only runs if the cluster creation tasks were successfulloca
