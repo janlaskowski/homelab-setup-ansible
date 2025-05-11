@@ -1,0 +1,110 @@
+---
+# This playbook creates a k3d Kubernetes cluster on a local macOS machine.
+
+- name: Provision local k3d cluster
+  hosts: localhost # Target the local machine
+  connection: local # Run tasks locally
+
+  vars:
+    k3d_cluster_name: homelab # Name for your k3d cluster
+    k3s_image: rancher/k3s:v1.33.0-k3s1 # Specify the k3s image version for the cluster nodes
+    server_node_count: 1 # Number of server nodes
+    agent_node_count: 2  # Number of agent nodes
+    kubeconfig_merge_path: "{{ ansible_env.HOME }}/.kube/config" #Points where new kubeconfig will be merged
+    docker_app_path: "/Applications/Docker.app" # Default installation path for Docker Desktop on macOS
+
+  tasks:
+    - name: Ensure Homebrew is installed (M1/M2/M3/M4 path)
+      stat:
+        path: /opt/homebrew/bin/brew # Check common M1/M2/M3 path
+      register: homebrew_check_arm
+
+    - name: Install Homebrew if not found
+      shell: /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+      when: not homebrew_check_arm.stat.exists and not homebrew_check_intel.stat.exists
+      args:
+        creates: "{{ '/opt/homebrew/bin/brew' if homebrew_check_arm.stat.exists else '/usr/local/bin/brew' }}" # Prevent re-running
+
+    - name: Check if Docker daemon is accessible
+      command: docker info # Run a simple command to check daemon connectivity
+      register: docker_info_check
+      ignore_errors: true # Don't stop the playbook if this fails immediately
+      changed_when: false # This command doesn't change the system
+
+    - name: Open Docker Desktop if daemon is not accessible
+      command: "open {{ docker_app_path }}"
+      when: docker_info_check.rc != 0 # Only attempt to open if the docker info check failed
+      register: open_docker_result
+      # Use async and poll 0 to run this command in the background and not wait for it
+      async: 1 # Run asynchronously for 1 second (just enough to launch)
+      poll: 0  # Do not wait for the command to complete
+
+    - name: Wait for Docker daemon to become accessible
+      command: docker info
+      register: docker_info_wait
+      until: docker_info_wait.rc == 0 # Keep trying until docker info succeeds
+      retries: 30 # Try up to 30 times
+      delay: 5 # Wait 5 seconds between retries
+      ignore_errors: true # Don't fail the task immediately on each retry
+      changed_when: false # This command doesn't change the system
+
+    - name: Fail if Docker daemon did not become accessible after waiting
+      fail:
+        msg: |
+          Could not connect to the Docker daemon after attempting to open Docker Desktop.
+          Please ensure Docker Desktop is running and accessible from your terminal.
+          Try running 'docker info' or 'docker ps' manually to troubleshoot.
+      when: docker_info_wait.rc != 0 # Fail if the wait loop finished but docker info still failed
+
+
+    - name: Install k3d via Homebrew
+      community.general.homebrew:
+        name: k3d
+        state: present
+        state: latest
+        update_homebrew: yes # Ensure Homebrew is updated before installing
+
+    - name: Check if k3d cluster already exists
+      command: k3d cluster list -o json
+      register: k3d_list
+      changed_when: false # This command doesn't change the system
+      ignore_errors: true # Ignore if k3d command isn't found yet (handled by install task)
+
+    - name: Create k3d cluster if it does not exist
+      command: >
+        k3d cluster create {{ k3d_cluster_name }}
+        --image {{ k3s_image }}
+        --servers {{ server_node_count }}
+        --agents {{ agent_node_count }}
+        --wait
+      when: k3d_list is success and k3d_cluster_name not in k3d_list.stdout # Only create if k3d list succeeded and cluster doesn't exist
+      register: create_cluster_result
+
+    - name: Get kubeconfig for the k3d cluster
+      command: "k3d kubeconfig get {{ k3d_cluster_name }}"
+      register: k3d_kubeconfig
+      changed_when: false # Getting kubeconfig doesn't change the system
+      when: k3d_list is success # Only get kubeconfig if k3d command succeeded
+
+    - name: Ensure .kube directory exists
+      ansible.builtin.file:
+        path: "{{ ansible_env.HOME }}/.kube"
+        state: directory
+        mode: '0755'
+
+    - name: Merge k3d kubeconfig into main config file
+      command: "k3d kubeconfig merge {{ k3d_cluster_name }} -o {{ kubeconfig_merge_path }}"
+      register: k3d_kubeconfig_merge_result
+      changed_when: k3d_kubeconfig_merge_result.rc == 0 # Mark as changed if the merge command succeeded
+      when: k3d_list is success # Only attempt to merge if k3d command succeeded
+
+    - name: Inform user about kubeconfig
+      debug:
+        msg: |
+          k3d cluster '{{ k3d_cluster_name }}' is ready.
+          Kubeconfig merged into: {{ kubeconfig_merge_path }}
+          You should now see the 'k3d-{{ k3d_cluster_name }}' context when you run 'kubectl config get-contexts'.
+      when: create_cluster_result is defined or (k3d_list is success and k3d_cluster_name in k3d_list.stdout) # Show message if cluster was created or already existed
+
+
+

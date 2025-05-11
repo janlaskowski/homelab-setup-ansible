@@ -1,0 +1,27 @@
+---
+# This playbook deletes a k3d Kubernetes cluster on a local macOS machine.
+
+- name: Decommission local k3d cluster
+  hosts: localhost
+  connection: local
+
+  vars:
+    k3d_cluster_name: homelab # Name of the k3d cluster to delete
+
+  tasks:
+    - name: Check if k3d cluster exists
+      command: k3d cluster list -o json
+      register: k3d_list
+      changed_when: false # This command doesn't change the system
+      ignore_errors: true # Don't fail if k3d command isn't found yet
+
+    - name: Delete k3d cluster if it exists
+      command: "k3d cluster delete {{ k3d_cluster_name }}"
+      when: k3d_list is success and k3d_cluster_name in k3d_list.stdout # Only delete if k3d command succeeded and cluster name is in the list
+      register: delete_cluster_result
+
+    - name: Inform user about deletion
+      debug:
+        msg: "k3d cluster '{{ k3d_cluster_name }}' deleted."
+      when: delete_cluster_result is defined and delete_cluster_result is not skipped # Only show message if deletion was attempted
+
